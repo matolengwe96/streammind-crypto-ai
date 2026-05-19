@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from datetime import datetime
 from typing import List, Dict, Any
 
 import psycopg2
@@ -12,20 +13,20 @@ from pydantic import BaseModel
 
 
 # =========================================================
-# Load environment variables
+# ENV
 # =========================================================
 
 load_dotenv()
 
 
 # =========================================================
-# FastAPI app
+# FASTAPI
 # =========================================================
 
 app = FastAPI(
-    title="StreamMind Crypto AI Service",
-    description="AI assistant, trade signals, and WebSocket service for crypto streaming analytics",
-    version="1.2.0",
+    title="StreamMind Crypto AI",
+    version="2.0.0",
+    description="Real-time AI crypto analytics platform",
 )
 
 
@@ -43,14 +44,16 @@ app.add_middleware(
 
 
 # =========================================================
-# OpenAI client
+# OPENAI
 # =========================================================
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
 
 # =========================================================
-# Request models
+# MODELS
 # =========================================================
 
 class ChatRequest(BaseModel):
@@ -58,10 +61,11 @@ class ChatRequest(BaseModel):
 
 
 # =========================================================
-# PostgreSQL connection
+# DATABASE
 # =========================================================
 
 def get_connection():
+
     return psycopg2.connect(
         host=os.getenv("PG_HOST"),
         port=os.getenv("PG_PORT"),
@@ -72,10 +76,11 @@ def get_connection():
 
 
 # =========================================================
-# Fetch latest crypto data from PostgreSQL
+# FETCH DATA
 # =========================================================
 
-def fetch_latest_crypto_data(limit: int = 50) -> List[Dict[str, Any]]:
+def fetch_latest_crypto_data(limit=50):
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -87,94 +92,85 @@ def fetch_latest_crypto_data(limit: int = 50) -> List[Dict[str, Any]]:
             currency,
             price,
             change_24h,
-            last_updated_at,
-            streamed_at,
-            kafka_topic,
             kafka_partition,
             kafka_offset,
-            created_at
+            streamed_at
         FROM crypto_prices
         ORDER BY id DESC
         LIMIT %s;
         """,
-        (limit,),
+        (limit,)
     )
 
     rows = cursor.fetchall()
+
     columns = [desc[0] for desc in cursor.description]
 
     cursor.close()
     conn.close()
 
-    return [dict(zip(columns, row)) for row in rows]
+    return [
+        dict(zip(columns, row))
+        for row in rows
+    ]
 
 
 # =========================================================
-# Trade signal logic
+# SIGNAL ENGINE
 # =========================================================
 
-def generate_trade_signal(change_24h: float) -> Dict[str, Any]:
-    """
-    Rule-based signal engine.
-    This is NOT financial advice. It is a demo analytics signal.
-    """
+def generate_trade_signal(change):
 
-    if change_24h <= -5:
+    if change <= -5:
         return {
-            "signal": "AVOID",
+            "signal": "STRONG SELL",
             "risk": "Very High",
-            "confidence": 90,
-            "reason": "Sharp negative 24h movement indicates heavy selling pressure.",
+            "confidence": 92,
+            "reason": "Heavy downside pressure detected.",
         }
 
-    if change_24h <= -3:
+    if change <= -2:
         return {
-            "signal": "SELL / AVOID",
+            "signal": "SELL",
             "risk": "High",
             "confidence": 84,
-            "reason": "Strong downside movement suggests elevated short-term risk.",
+            "reason": "Negative momentum accelerating.",
         }
 
-    if change_24h <= -1:
-        return {
-            "signal": "WATCH",
-            "risk": "Medium",
-            "confidence": 72,
-            "reason": "Asset is declining, but not in extreme territory.",
-        }
-
-    if -1 < change_24h < 1:
+    if -2 < change < 1:
         return {
             "signal": "HOLD",
             "risk": "Moderate",
-            "confidence": 68,
-            "reason": "Price movement is relatively stable.",
+            "confidence": 70,
+            "reason": "Market consolidating.",
         }
 
-    if change_24h >= 3:
+    if change >= 4:
         return {
-            "signal": "MOMENTUM BUY",
+            "signal": "STRONG BUY",
             "risk": "Medium",
-            "confidence": 78,
-            "reason": "Strong positive movement indicates bullish momentum.",
+            "confidence": 90,
+            "reason": "Strong bullish momentum detected.",
         }
 
     return {
-        "signal": "HOLD / WATCH",
+        "signal": "BUY",
         "risk": "Low-Medium",
-        "confidence": 70,
-        "reason": "Positive movement exists, but trend confirmation is limited.",
+        "confidence": 78,
+        "reason": "Positive momentum building.",
     }
 
 
 # =========================================================
-# Build analytics from latest events
+# ANALYTICS ENGINE
 # =========================================================
 
-def build_local_analytics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_analytics(data):
+
     latest_by_coin = {}
 
     for event in data:
+
         coin = event["coin_id"]
 
         if coin not in latest_by_coin:
@@ -183,106 +179,121 @@ def build_local_analytics(data: List[Dict[str, Any]]) -> Dict[str, Any]:
     coins = list(latest_by_coin.values())
 
     if not coins:
+
         return {
-            "totalEvents": 0,
-            "trackedCoins": 0,
-            "latestByCoin": {},
-            "biggestGainer": None,
-            "biggestLoser": None,
-            "sentiment": "Neutral",
+            "sentiment": "Unknown",
             "riskLevel": "Unknown",
             "confidence": 0,
             "tradeSignals": {},
         }
 
-    biggest_gainer = max(coins, key=lambda coin: float(coin["change_24h"]))
-    biggest_loser = min(coins, key=lambda coin: float(coin["change_24h"]))
+    average_change = (
+        sum(float(c["change_24h"]) for c in coins)
+        / len(coins)
+    )
 
-    negative_count = sum(1 for coin in coins if float(coin["change_24h"]) < 0)
-    positive_count = sum(1 for coin in coins if float(coin["change_24h"]) > 0)
+    positive = len([
+        c for c in coins
+        if float(c["change_24h"]) > 0
+    ])
 
-    average_change = sum(float(coin["change_24h"]) for coin in coins) / len(coins)
+    negative = len([
+        c for c in coins
+        if float(c["change_24h"]) < 0
+    ])
 
-    if negative_count == len(coins):
-        sentiment = "Bearish"
-        confidence = 88
-    elif positive_count == len(coins):
+    if positive == len(coins):
         sentiment = "Bullish"
-        confidence = 88
-    elif negative_count > positive_count:
-        sentiment = "Cautiously Bearish"
-        confidence = 74
-    elif positive_count > negative_count:
+        confidence = 90
+
+    elif negative == len(coins):
+        sentiment = "Bearish"
+        confidence = 90
+
+    elif positive > negative:
         sentiment = "Cautiously Bullish"
-        confidence = 74
+        confidence = 76
+
+    elif negative > positive:
+        sentiment = "Cautiously Bearish"
+        confidence = 76
+
     else:
         sentiment = "Neutral"
         confidence = 60
 
     if average_change <= -4:
-        risk_level = "Very High"
+        risk = "Very High"
+
     elif average_change <= -2:
-        risk_level = "High"
-    elif average_change < 0:
-        risk_level = "Medium"
-    elif average_change < 2:
-        risk_level = "Low-Medium"
+        risk = "High"
+
+    elif average_change < 1:
+        risk = "Medium"
+
     else:
-        risk_level = "Medium"
+        risk = "Low-Medium"
 
     trade_signals = {}
 
     for coin in coins:
-        coin_id = coin["coin_id"]
-        change_24h = float(coin["change_24h"])
 
-        trade_signals[coin_id] = {
-            "coin_id": coin_id,
+        trade_signals[coin["coin_id"]] = {
+            "coin_id": coin["coin_id"],
             "price": float(coin["price"]),
-            "change_24h": change_24h,
-            **generate_trade_signal(change_24h),
+            "change_24h": float(coin["change_24h"]),
+            **generate_trade_signal(
+                float(coin["change_24h"])
+            ),
         }
 
     return {
-        "totalEvents": len(data),
-        "trackedCoins": len(coins),
-        "latestByCoin": latest_by_coin,
-        "biggestGainer": biggest_gainer,
-        "biggestLoser": biggest_loser,
         "sentiment": sentiment,
-        "riskLevel": risk_level,
+        "riskLevel": risk,
         "confidence": confidence,
         "averageChange24h": round(average_change, 2),
         "tradeSignals": trade_signals,
+        "latestByCoin": latest_by_coin,
+        "trackedCoins": len(coins),
+        "totalEvents": len(data),
     }
 
 
 # =========================================================
-# Root endpoint
+# ROOT
 # =========================================================
 
 @app.get("/")
 def root():
+
     return {
-        "message": "StreamMind Crypto AI Service is running",
-        "endpoints": [
-            "/ai/raw-analytics",
-            "/ai/market-summary",
-            "/ai/trade-signals",
-            "/ai/chat",
-            "/ws/market",
-        ],
+        "message": "StreamMind Crypto AI running",
+        "time": str(datetime.utcnow()),
     }
 
 
 # =========================================================
-# Raw analytics endpoint
+# HEALTH
+# =========================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy",
+        "service": "streammind-ai",
+    }
+
+
+# =========================================================
+# RAW ANALYTICS
 # =========================================================
 
 @app.get("/ai/raw-analytics")
 def raw_analytics():
+
     data = fetch_latest_crypto_data()
-    analytics = build_local_analytics(data)
+    analytics = build_analytics(data)
 
     return {
         **analytics,
@@ -291,215 +302,189 @@ def raw_analytics():
 
 
 # =========================================================
-# Trade signals endpoint
+# TRADE SIGNALS
 # =========================================================
 
 @app.get("/ai/trade-signals")
 def trade_signals():
-    data = fetch_latest_crypto_data()
-    analytics = build_local_analytics(data)
 
-    return {
-        "sentiment": analytics["sentiment"],
-        "riskLevel": analytics["riskLevel"],
-        "confidence": analytics["confidence"],
-        "averageChange24h": analytics["averageChange24h"],
-        "tradeSignals": analytics["tradeSignals"],
-        "disclaimer": "Signals are for educational demo purposes only and are not financial advice.",
-    }
+    data = fetch_latest_crypto_data()
+    analytics = build_analytics(data)
+
+    return analytics
 
 
 # =========================================================
-# AI market summary endpoint
+# AI MARKET SUMMARY
 # =========================================================
 
 @app.get("/ai/market-summary")
 def market_summary():
+
     data = fetch_latest_crypto_data()
-    analytics = build_local_analytics(data)
+    analytics = build_analytics(data)
 
     prompt = f"""
-You are StreamMind AI, an institutional-grade crypto intelligence platform.
+You are StreamMind AI.
 
-Analyze the latest real-time Kafka streaming crypto data.
+Analyze this live crypto market.
 
-Return a professional report with:
-
-1. Market sentiment
-2. Risk level
-3. Strongest asset
-4. Weakest asset
-5. Trade signal overview
-6. Volatility observations
-7. Short-term trader guidance
-8. Why real-time streaming matters
-
-Important:
-- Do not provide financial advice.
-- Be concise.
-- Be investor-ready.
-
-System Sentiment:
+Market Sentiment:
 {analytics["sentiment"]}
 
-Risk Level:
+Risk:
 {analytics["riskLevel"]}
 
-Confidence:
-{analytics["confidence"]}%
-
 Trade Signals:
-{json.dumps(analytics["tradeSignals"], default=str)}
+{json.dumps(analytics["tradeSignals"])}
 
-Latest Market Data:
-{json.dumps(data, default=str)}
+Provide:
+1. Market outlook
+2. Strongest asset
+3. Weakest asset
+4. Risk analysis
+5. Trading interpretation
+6. Momentum discussion
+
+Keep concise and professional.
 """
 
     try:
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a professional crypto market analyst. "
-                        "You explain market data clearly and never provide financial advice."
-                    ),
+                    "content": """
+You are a professional crypto market analyst.
+Never give financial advice.
+Use concise institutional-style analysis.
+"""
                 },
                 {
                     "role": "user",
                     "content": prompt,
-                },
+                }
             ],
             temperature=0.4,
         )
 
         return {
             "summary": response.choices[0].message.content,
-            "sentiment": analytics["sentiment"],
-            "riskLevel": analytics["riskLevel"],
-            "confidence": analytics["confidence"],
-            "tradeSignals": analytics["tradeSignals"],
-            "source": "openai",
-            "model": "gpt-4o-mini",
+            "analytics": analytics,
         }
 
     except Exception as error:
+
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI request failed: {error}",
+            detail=str(error)
         )
 
 
 # =========================================================
-# AI chat endpoint
+# AI CHAT
 # =========================================================
 
 @app.post("/ai/chat")
-def chat_with_market_data(request: ChatRequest):
+def ai_chat(request: ChatRequest):
+
     data = fetch_latest_crypto_data()
-    analytics = build_local_analytics(data)
+    analytics = build_analytics(data)
 
-    prompt = f"""
-You are StreamMind AI, a real-time crypto streaming analytics copilot.
+    system_prompt = f"""
+You are StreamMind AI.
 
-Answer the user's question using ONLY the live market data below.
+You are a live crypto intelligence assistant.
 
-Do not provide financial advice.
-Be concise, practical, and professional.
-
-User Question:
-{request.question}
-
-Market Sentiment:
+Current Market Sentiment:
 {analytics["sentiment"]}
 
 Risk Level:
 {analytics["riskLevel"]}
 
-AI Confidence:
-{analytics["confidence"]}%
-
 Trade Signals:
-{json.dumps(analytics["tradeSignals"], default=str)}
+{json.dumps(analytics["tradeSignals"])}
 
-Biggest Gainer:
-{analytics["biggestGainer"]}
-
-Biggest Loser:
-{analytics["biggestLoser"]}
-
-Latest Market Data:
-{json.dumps(data, default=str)}
+Rules:
+- Never provide financial advice
+- Keep answers concise
+- Explain reasoning clearly
+- Use live market data
+- Mention strongest and weakest assets when relevant
 """
 
     try:
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are StreamMind AI, a professional crypto analytics assistant. "
-                        "Use streaming data only. Do not provide financial advice."
-                    ),
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
-                    "content": prompt,
-                },
+                    "content": request.question,
+                }
             ],
-            temperature=0.4,
+            temperature=0.5,
         )
 
         return {
             "question": request.question,
             "answer": response.choices[0].message.content,
-            "sentiment": analytics["sentiment"],
-            "riskLevel": analytics["riskLevel"],
-            "confidence": analytics["confidence"],
-            "tradeSignals": analytics["tradeSignals"],
+            "timestamp": str(datetime.utcnow()),
         }
 
     except Exception as error:
+
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI chat request failed: {error}",
+            detail=f"AI chat failed: {error}"
         )
 
 
 # =========================================================
-# WebSocket endpoint
+# WEBSOCKET
 # =========================================================
 
 @app.websocket("/ws/market")
 async def websocket_market(websocket: WebSocket):
+
     await websocket.accept()
 
     try:
+
         while True:
-            data = fetch_latest_crypto_data(limit=50)
-            analytics = build_local_analytics(data)
+
+            data = fetch_latest_crypto_data()
+            analytics = build_analytics(data)
 
             payload = {
                 "type": "market_update",
-                "analytics": {
-                    **analytics,
-                    "latestDatabaseEvents": data,
-                },
+                "timestamp": str(datetime.utcnow()),
+                "analytics": analytics,
+                "latestDatabaseEvents": data,
             }
 
-            await websocket.send_text(json.dumps(payload, default=str))
+            await websocket.send_text(
+                json.dumps(payload, default=str)
+            )
 
             await asyncio.sleep(2)
 
     except WebSocketDisconnect:
-        print("WebSocket client disconnected")
+
+        print("WebSocket disconnected")
 
     except Exception as error:
+
         print("WebSocket error:", error)
 
         try:
             await websocket.close()
-        except Exception:
+
+        except:
             pass
